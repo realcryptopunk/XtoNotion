@@ -85,6 +85,7 @@ class OpenAIHandler:
     
     async def extract_with_playwright(self, url):
         """Extract tweet content using Playwright browser automation."""
+        logger.info("Running new version of extract_with_playwright with improved browser configuration")
         if not await self.init_playwright():
             return None
         
