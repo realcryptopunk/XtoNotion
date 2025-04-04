@@ -55,7 +55,24 @@ class OpenAIHandler:
                 
                 logger.info("Initializing Playwright...")
                 self.playwright = await async_playwright().start()
-                self.browser = await self.playwright.chromium.launch(headless=True)
+                
+                # Use a more realistic browser configuration
+                self.browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-features=IsolateOrigins,site-per-process',
+                        '--disable-site-isolation-trials',
+                        '--disable-web-security',
+                        '--disable-features=BlockInsecurePrivateNetworkRequests',
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-accelerated-2d-canvas',
+                        '--disable-gpu',
+                        '--window-size=1920,1080',
+                    ]
+                )
                 playwright_initialized = True
                 logger.info("Playwright initialized successfully")
             except ImportError:
@@ -81,55 +98,113 @@ class OpenAIHandler:
                 has_touch=True,
                 locale="en-US",
                 timezone_id="America/New_York",
-                is_mobile=True
+                is_mobile=True,
+                java_script_enabled=True,
+                bypass_csp=True,
+                ignore_https_errors=True
             )
             
             # Add random cookies and headers to appear more like a real browser
             await context.add_cookies([
                 {"name": "seen_ui_prompt", "value": "true", "domain": ".twitter.com", "path": "/"},
-                {"name": "seen_ui_prompt", "value": "true", "domain": ".x.com", "path": "/"}
+                {"name": "seen_ui_prompt", "value": "true", "domain": ".x.com", "path": "/"},
+                {"name": "auth_token", "value": "", "domain": ".twitter.com", "path": "/"},
+                {"name": "ct0", "value": "", "domain": ".twitter.com", "path": "/"},
+                {"name": "twid", "value": "", "domain": ".twitter.com", "path": "/"}
             ])
+            
+            # Set extra headers to appear more like a real browser
+            await context.set_extra_http_headers({
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0"
+            })
             
             page = await context.new_page()
             
             # Set longer timeout for Twitter's slow loading
-            page.set_default_timeout(45000)  # Increase timeout to 45 seconds
+            page.set_default_timeout(60000)  # Increase timeout to 60 seconds
             
             logger.info(f"Navigating to Twitter URL: {url}")
-            await page.goto(url, wait_until="domcontentloaded")
+            
+            # Try multiple navigation strategies
+            navigation_success = False
+            for _ in range(3):  # Try up to 3 times
+                try:
+                    response = await page.goto(url, wait_until="networkidle", timeout=60000)
+                    if response and response.ok:
+                        navigation_success = True
+                        break
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    logger.warning(f"Navigation attempt failed: {e}")
+                    await asyncio.sleep(2)
+            
+            if not navigation_success:
+                logger.warning("Failed to navigate to the page after multiple attempts")
+                return None
             
             # Wait longer for dynamic content
-            await asyncio.sleep(4)  # Increased from 2 to 4 seconds
+            await asyncio.sleep(5)  # Increased from 4 to 5 seconds
             
             # Try to handle the login modal more aggressively
             try:
                 # First try to handle the login dialog if present
-                if await page.locator('div[role="dialog"]').count() > 0:
-                    logger.info("Login dialog detected, attempting to dismiss")
-                    
-                    # Try multiple approaches to dismiss the dialog
-                    try:
-                        # Try to find and click the "✕" close button
-                        close_button = page.locator('div[role="button"][aria-label="Close"]')
-                        if await close_button.count() > 0:
-                            await close_button.click()
-                            await asyncio.sleep(1)
-                        else:
-                            # Try to click in the top-left corner to close dialog
+                login_dialog_selectors = [
+                    'div[role="dialog"]',
+                    'div[data-testid="loginDialog"]',
+                    'div[data-testid="modal"]',
+                    'div[aria-modal="true"]'
+                ]
+                
+                for selector in login_dialog_selectors:
+                    if await page.locator(selector).count() > 0:
+                        logger.info(f"Login dialog detected with selector: {selector}, attempting to dismiss")
+                        
+                        # Try multiple approaches to dismiss the dialog
+                        try:
+                            # Try to find and click the "✕" close button
+                            close_button_selectors = [
+                                'div[role="button"][aria-label="Close"]',
+                                'div[aria-label="Close"]',
+                                'div[data-testid="app-bar-close"]',
+                                'div[role="button"] svg[aria-label="Close"]'
+                            ]
+                            
+                            for close_selector in close_button_selectors:
+                                close_button = page.locator(close_selector)
+                                if await close_button.count() > 0:
+                                    await close_button.click()
+                                    await asyncio.sleep(1)
+                                    break
+                            
+                            # If close button didn't work, try clicking outside
                             await page.mouse.click(10, 10)
                             await asyncio.sleep(1)
                             
                             # Try clicking at the tweet content area
                             await page.mouse.click(195, 400)
                             await asyncio.sleep(1)
-                    except Exception as e:
-                        logger.warning(f"Error dismissing dialog: {e}")
+                            
+                            # Try pressing Escape key
+                            await page.keyboard.press('Escape')
+                            await asyncio.sleep(1)
+                        except Exception as e:
+                            logger.warning(f"Error dismissing dialog: {e}")
                 
                 # Scroll down to load more content
                 await page.evaluate("window.scrollBy(0, 300)")
                 await asyncio.sleep(1)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error handling login dialog: {e}")
             
             # Try different selectors that might match tweet content
             tweet_content = None
@@ -146,7 +221,11 @@ class OpenAIHandler:
                 # Mobile selectors
                 'div[dir="auto"] > span',
                 'div.r-yfoy6g',
-                '[data-testid="tweet"] div[lang]'
+                '[data-testid="tweet"] div[lang]',
+                'div[data-testid="tweet"] span[data-text="true"]',
+                'div[data-testid="tweet"] div[dir="auto"]',
+                'div[data-testid="tweet"] span[class*="css-"]',
+                'div[data-testid="tweet"] span[class*="r-"]'
             ]:
                 try:
                     element = page.locator(content_selector)
@@ -166,7 +245,10 @@ class OpenAIHandler:
                 # Mobile selectors
                 'h2[role="heading"]',
                 '[data-testid="User-Name"] span.r-18u37iz',
-                '[data-testid="tweetAuthor"]'
+                '[data-testid="tweetAuthor"]',
+                'div[data-testid="User-Name"] span[class*="css-"]',
+                'div[data-testid="User-Name"] span[class*="r-"]',
+                'div[data-testid="User-Name"] a[role="link"] span'
             ]:
                 try:
                     element = page.locator(author_selector)
@@ -184,7 +266,10 @@ class OpenAIHandler:
                 'article a time',
                 # Mobile selectors
                 'div[data-testid="User-Name"] span.r-18u37iz',
-                'span.r-1qd0xha time'
+                'span.r-1qd0xha time',
+                'div[data-testid="User-Name"] time',
+                'div[data-testid="User-Name"] span[class*="css-"] time',
+                'div[data-testid="User-Name"] span[class*="r-"] time'
             ]:
                 try:
                     element = page.locator(time_selector)
