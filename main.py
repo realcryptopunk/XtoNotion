@@ -429,7 +429,7 @@ async def run_telegram_bot():
         await application.initialize()
         await application.start()
         # Start polling for updates
-        await application.updater.start_polling()
+        await application.updater.start_polling(poll_interval=1200)  # Set poll interval to 1200 seconds (20 minutes)
         
         # Keep the bot running until stopped
         logger.info("Bot is running. Press Ctrl+C to stop.")
